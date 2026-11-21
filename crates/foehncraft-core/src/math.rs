@@ -519,6 +519,82 @@ pub fn tanh(x: f64) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// the error function (exact solutions of transient conduction, stage 7d6)
+
+/// 1/√π.
+const FRAC_1_SQRT_PI: f64 = 0.564_189_583_547_756_3;
+/// Below this |x| the series of erf, above it the continued fraction of
+/// erfc.
+const ERF_SPLIT: f64 = 0.75;
+
+/// e^(−x²) for x ≥ 0 with x² taken in two parts: x = x_h + x_l with x_h
+/// on a grid of 2⁻¹², so x_h² is exact and e^(−x²) = e^(−x_h²) e^(−x_l (x
+/// + x_h)) does not carry the rounding of x² (which grows with x²).
+fn exp_minus_square(x: f64) -> f64 {
+    let xh = trunc(x * 4096.0) / 4096.0;
+    exp(-xh * xh) * exp(-(x - xh) * (x + xh))
+}
+
+/// erf x for 0 ≤ x < [`ERF_SPLIT`]: the series of positive terms
+/// erf x = (2/√π) e^(−x²) Σ 2ⁿ x^(2n+1)/(1·3···(2n+1)) (Abramowitz &
+/// Stegun 1964, 7.1.6); 30 terms are far beyond the last digit there.
+fn erf_series(x: f64) -> f64 {
+    let x2 = x * x;
+    let (mut term, mut sum) = (x, x);
+    for n in 1..30 {
+        term *= 2.0 * x2 / (2 * n + 1) as f64;
+        sum += term;
+    }
+    2.0 * FRAC_1_SQRT_PI * exp(-x2) * sum
+}
+
+/// erfc x for x ≥ [`ERF_SPLIT`]: Laplace's continued fraction
+/// erfc x = e^(−x²)/√π · 1/(x + (1/2)/(x + 1/(x + (3/2)/(x + …))))
+/// (Abramowitz & Stegun 1964, 7.1.14), evaluated from the tail with
+/// 200/x² + 10 levels (at most 400), which converges to the last digit.
+fn erfc_fraction(x: f64) -> f64 {
+    let n = (200.0 / (x * x)) as usize + 10;
+    let mut f = x;
+    for k in (1..=n.min(400)).rev() {
+        f = x + 0.5 * k as f64 / f;
+    }
+    exp_minus_square(x) * FRAC_1_SQRT_PI / f
+}
+
+/// The error function erf x = (2/√π) ∫₀ˣ e^(−t²) dt.
+pub fn erf(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let a = abs(x);
+    let r = if a < ERF_SPLIT {
+        erf_series(a)
+    } else if a < 6.0 {
+        1.0 - erfc_fraction(a)
+    } else {
+        1.0
+    };
+    if x < 0.0 { -r } else { r }
+}
+
+/// The complementary error function erfc x = 1 − erf x, accurate also
+/// where it is small (to about 27, where it leaves the doubles).
+pub fn erfc(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let a = abs(x);
+    let r = if a < ERF_SPLIT {
+        1.0 - erf_series(a)
+    } else if a < 27.3 {
+        erfc_fraction(a)
+    } else {
+        0.0
+    };
+    if x < 0.0 { 2.0 - r } else { r }
+}
+
+// ---------------------------------------------------------------------------
 // switches of the turbulence models (stage 6 specification, section 2.6)
 
 /// Default relative width w of the smooth switches [`smin`] and [`smax`].
@@ -755,6 +831,60 @@ mod tests {
             assert!(d <= 16, "pow({x}, 0.7): {d} ulp");
         }
     }
+    #[test]
+    fn error_function() {
+        // (x, erf x, erfc x) of the C library (glibc, within 1 ulp)
+        for (x, e, c) in [
+            (0.0, 0.0, 1.0),
+            (0.1, 0.1124629160182849, 0.8875370839817152),
+            (0.3, 0.3286267594591274, 0.6713732405408726),
+            (0.5, 0.5204998778130465, 0.4795001221869535),
+            (0.7, 0.6778011938374184, 0.32219880616258156),
+            (0.74, 0.7046780778547458, 0.2953219221452542),
+            (0.76, 0.7175367528055908, 0.28246324719440913),
+            (1.0, 0.8427007929497149, 0.15729920705028513),
+            (1.3, 0.9340079449406524, 0.06599205505934755),
+            (1.5, 0.9661051464753108, 0.033894853524689274),
+            (2.0, 0.9953222650189527, 0.004677734981047265),
+            (2.5, 0.999593047982555, 0.0004069520174449589),
+            (3.0, 0.9999779095030014, 2.2090496998585438e-05),
+            (4.0, 0.9999999845827421, 1.541725790028002e-08),
+            (5.0, 0.9999999999984626, 1.5374597944280351e-12),
+            (6.0, 1.0, 2.1519736712498916e-17),
+            (8.0, 1.0, 1.1224297172982928e-29),
+            (10.0, 1.0, 2.088487583762545e-45),
+            (15.0, 1.0, 7.212994172451206e-100),
+            (20.0, 1.0, 5.3958656116079005e-176),
+            (26.0, 1.0, 5.663192408856143e-296),
+        ] {
+            assert!(ulps(erf(x), e) <= 4, "erf({x}) = {:e}, want {e:e}", erf(x));
+            assert!(
+                ulps(erfc(x), c) <= 6,
+                "erfc({x}) = {:e}, want {c:e}",
+                erfc(x)
+            );
+            assert_eq!(erf(-x), -erf(x));
+            assert!(
+                (erfc(-x) - (1.0 + e)).abs() <= 2.0 * f64::EPSILON,
+                "erfc(-{x})"
+            );
+        }
+        // erf + erfc = 1 and the derivative (2/√π) e^(−x²) over the range
+        for x in sweep(0.0, 6.0, 6_000) {
+            assert!((erf(x) + erfc(x) - 1.0).abs() <= 2.0 * f64::EPSILON, "{x}");
+            let h = 1e-5;
+            let d = (erf(x + h) - erf(x - h)) / (2.0 * h);
+            assert!(
+                (d - 2.0 * FRAC_1_SQRT_PI * exp(-x * x)).abs() < 1e-9,
+                "erf'({x})"
+            );
+        }
+        assert!(erf(f64::NAN).is_nan() && erfc(f64::NAN).is_nan());
+        assert_eq!(erf(f64::INFINITY), 1.0);
+        assert_eq!(erfc(f64::INFINITY), 0.0);
+        assert_eq!(erfc(f64::NEG_INFINITY), 2.0);
+    }
+
     #[test]
     fn hard_switches_are_min_max_abs() {
         assert_eq!(pmin(1.0, 2.0), 1.0);

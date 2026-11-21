@@ -14,9 +14,10 @@
 > convection, rotating machinery), release 0.6.** The stage
 > plan and every decision are in [docs/requirements.md](docs/requirements.md);
 > [What works today](#what-works-today) lists what is on `main` now. Stage 7 is
-> under way: the energy equation of the fluid and steady conjugate heat
-> transfer with solid regions, laminar and turbulent, are in; transient
-> conjugate heat transfer comes next, buoyancy and variable density later.
+> under way: the energy equation of the fluid and conjugate heat transfer
+> with solid regions, steady and transient, laminar and turbulent, are in;
+> contact resistance and orthotropic solids come next, buoyancy and
+> variable density later.
 
 [![CI](https://github.com/chiefenne/Foehncraft/actions/workflows/ci.yml/badge.svg)](https://github.com/chiefenne/Foehncraft/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/chiefenne/Foehncraft)](https://github.com/chiefenne/Foehncraft/releases)
@@ -96,8 +97,13 @@ Everything below is on `main`, verified by the cases of the
   interface (a composite wall exact to round-off). With a turbulence model
   the thermal wall function sits in series with the solid's half cell at
   every interface, and the turbulent channel over a conducting wall gives
-  the same heat flow as the independent wall-function path to 10⁻⁴ (steady
-  so far; transient conjugate heat transfer comes next).
+  the same heat flow as the independent wall-function path to 10⁻⁴. In
+  time, the fluid and the solids heat up in one matrix with the time terms
+  of both: two bodies brought into contact keep the exact contact
+  temperature and follow the erf profiles at second order in space and
+  time, and a heated wall switched on closes its heat balance (input,
+  outflow, heat stored per region, written every step) to 10⁻¹¹ in every
+  step.
 - **Rotating machinery.** The moving reference frame (steady and transient
   frozen rotor), the sliding mesh by conformal stepping and by imprinting
   the interface in every step, several rotors at their own speeds,

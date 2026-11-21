@@ -1,6 +1,7 @@
-//! Stage 7, PR 7d1: solid regions in the energy equation, conjugate heat
-//! transfer (D112, D157), docs/requirements/stage7-energy-buoyancy-cht.md,
-//! check V7.4.
+//! Stage 7, PRs 7d1, 7d5 and 7d6: solid regions in the energy equation,
+//! conjugate heat transfer (D112, D157), steady, turbulent and transient,
+//! docs/requirements/stage7-energy-buoyancy-cht.md, checks V7.4, V7.6,
+//! V7.36 and V7.37.
 
 use foehncraft_flow::case::{FlowCase, FlowReport, run};
 use foehncraft_flow::diag;
@@ -145,10 +146,236 @@ fn solid_regions_are_checked() {
         );
     let (code, msg) = refused(&flow_only);
     assert_eq!(code, "REG001", "{msg}");
-    // transient conjugate heat transfer is a later step
-    let transient = base + "\n[time]\ntime_step = 0.01\nend_time = 0.1\n";
-    let (code, msg) = refused(&transient);
+    // passive scalars would diffuse into the solids
+    let dye = base + "\n[scalars.dye]\ndiffusivity = 1e-3\ninitial = 0.0\n";
+    let (code, msg) = refused(&dye);
     assert_eq!(code, "ENE006", "{msg}");
+}
+
+/// The contact temperature of two semi-infinite bodies (Carslaw & Jaeger
+/// 1959, §2.15).
+fn contact_temperature(k: [f64; 2], rho_cp: [f64; 2], t: [f64; 2]) -> f64 {
+    let e = [(k[0] * rho_cp[0]).sqrt(), (k[1] * rho_cp[1]).sqrt()];
+    (e[0] * t[0] + e[1] * t[1]) / (e[0] + e[1])
+}
+
+/// The temperature summary of a report and the interface boundary of it.
+fn temperature(r: &FlowReport) -> &foehncraft_flow::scalar::ScalarSummary {
+    r.solves[0]
+        .scalars
+        .iter()
+        .find(|s| s.name == "temperature")
+        .unwrap()
+}
+
+fn boundary<'a>(
+    s: &'a foehncraft_flow::scalar::ScalarSummary,
+    name: &str,
+) -> &'a foehncraft_flow::scalar::ScalarBoundarySummary {
+    s.boundaries.iter().find(|b| b.boundary == name).unwrap()
+}
+
+/// V7.6: two semi-infinite bodies brought into contact (the solid at
+/// 400 K, k = 10, the fluid at rest at 300 K, k = 1, both ρ c_p = 10⁶).
+/// The interface temperature is T_i from the first steps on; at 500 s the
+/// L2 error against the erf profiles of `[energy] exact` is below 0.01 K
+/// (in the case), the heat flow through the interface is
+/// e₁ (T₁ − T_i)/√(π t) per area, and the heat the solid loses is what the
+/// fluid stores, in every step.
+#[test]
+fn contact_of_two_bodies_keeps_the_contact_temperature() {
+    let base = text("cht_contact_transient.toml");
+    let ti = contact_temperature([10.0, 1.0], [1e6, 1e6], [400.0, 300.0]);
+    // after the first 10 steps: within 0.1 % of ΔT (the profiles are only
+    // a few cells deep, the L2 error is not checked yet)
+    let early = base
+        .replace("end_time = 500.0", "end_time = 10.0")
+        .replace("scalar_max_error = 0.01 ", "scalar_max_error = 1.0 ");
+    let r = run_case(&parse(&early), "contact_early");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let t = boundary(temperature(&r), "interface-bar").mean;
+    assert!((t - ti).abs() < 1e-3 * 100.0, "T_i {t} against {ti}");
+    // at 500 s
+    let r = run_case(&parse(&base), "contact");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let s = temperature(&r);
+    let b = boundary(s, "interface-bar");
+    assert!((b.mean - ti).abs() < 1e-6, "T_i {} against {ti}", b.mean);
+    let q = (10.0f64 * 1e6).sqrt() * (400.0 - ti) / (std::f64::consts::PI * 500.0).sqrt() * 1e-4;
+    let qi = b.heat_flow.unwrap();
+    assert!(
+        (qi / q - 1.0).abs() < 2e-3,
+        "interface {qi} W against {q} W"
+    );
+    assert!(s.l2.unwrap() < 6e-3, "L2 error {:?}", s.l2);
+    let e = s.energy.as_ref().unwrap();
+    let st: Vec<f64> = e.storage_regions.iter().map(|r| r.storage).collect();
+    assert_eq!(st.len(), 2, "{e:?}");
+    assert!((st[0] + st[1]).abs() < 1e-9 * st[0].abs(), "{e:?}");
+    assert!((st[0] / q - 1.0).abs() < 2e-3, "{e:?}");
+    let h = r.solves[0].transient.as_ref().unwrap();
+    assert!(h.heat_relative_max.unwrap() < 1e-9, "{h:?}");
+}
+
+/// V7.6 variants: copper against air (the contact temperature stays at
+/// that of the copper), and two equal bodies (T_i the mean, by symmetry
+/// to round-off).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release builds only (CI runs it)")]
+fn contact_of_copper_and_air_and_of_equal_bodies() {
+    let base = text("cht_contact_transient.toml");
+    // copper and air at 300 K (Incropera et al. 2007, tables A.1 and A.4)
+    let cu = (401.0, 8933.0, 385.0);
+    let air = (0.0263, 1.1614, 1007.0, 1.846e-5);
+    let copper = base
+        .replace("k1 = 10.0 ", "k1 = 401.0 ")
+        .replace("k2 = 1.0\n", "k2 = 0.0263\n")
+        .replace("c1 = 1.0e6 ", &format!("c1 = {} ", cu.1 * cu.2))
+        .replace("c2 = 1.0e6\n", &format!("c2 = {}\n", air.1 * air.2))
+        .replace(
+            "density = 1000.0\nviscosity = 1.0e-3\nspecific_heat = 1000.0\nconductivity = 1.0\n",
+            &format!(
+                "density = {}\nviscosity = {}\nspecific_heat = {}\nconductivity = {}\n",
+                air.1, air.3, air.2, air.0
+            ),
+        )
+        .replace(
+            "density = 1000.0\nspecific_heat = 1000.0\nconductivity = 10.0\n",
+            &format!(
+                "density = {}\nspecific_heat = {}\nconductivity = {}\n",
+                cu.1, cu.2, cu.0
+            ),
+        )
+        .replace("end_time = 500.0", "end_time = 100.0");
+    assert!(
+        copper.contains("conductivity = 401"),
+        "the copper replacements"
+    );
+    assert!(
+        copper.contains("conductivity = 0.0263"),
+        "the air replacements"
+    );
+    let ti = contact_temperature([cu.0, air.0], [cu.1 * cu.2, air.1 * air.2], [400.0, 300.0]);
+    let r = run_case(&parse(&copper), "contact_copper");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let t = boundary(temperature(&r), "interface-bar").mean;
+    assert!(
+        (t - ti).abs() < 1e-3 * 100.0,
+        "copper: T_i {t} against {ti}"
+    );
+    assert!(ti > 399.98, "{ti}");
+    // equal bodies
+    let equal = base
+        .replace("k1 = 10.0 ", "k1 = 1.0 ")
+        .replace("conductivity = 10.0\n", "conductivity = 1.0\n");
+    let r = run_case(&parse(&equal), "contact_equal");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let t = boundary(temperature(&r), "interface-bar").mean;
+    assert!((t - 350.0).abs() < 1e-9, "equal bodies: T_i {t}");
+}
+
+/// V7.6 orders: the error against the exact solution over three meshes
+/// (second order in space), the differences of successive solutions over
+/// four time steps (BDF2, second order in time); the case checks both
+/// against [1.8, 2.2].
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release builds only (CI runs it)")]
+fn contact_converges_at_second_order_in_space_and_time() {
+    let base = text("cht_contact_transient.toml");
+    let space = base
+        .replace("cells = [400, 1, 1]", "cells = [100, 1, 1]")
+        .replace("[verification]\n", "[verification]\nlevels = [0, 1, 2]\n");
+    let r = run_case(&parse(&space), "contact_space");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let (_, o) = r
+        .scalar_orders
+        .iter()
+        .find(|(n, _)| n == "temperature")
+        .expect("space orders");
+    assert!(
+        o.len() == 2 && o.iter().all(|o| (1.8..=2.2).contains(o)),
+        "space {o:?}"
+    );
+    let time = base.replace(
+        "[verification]\n",
+        "[verification]\ntime_steps = [20.0, 10.0, 5.0, 2.5]\n",
+    );
+    let r = run_case(&parse(&time), "contact_time");
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let (_, o) = r
+        .scalar_orders
+        .iter()
+        .find(|(n, _)| n == "temperature (time)")
+        .expect("time orders");
+    assert!(
+        o.len() == 2 && o.iter().all(|o| (1.8..=2.2).contains(o)),
+        "time {o:?}"
+    );
+}
+
+/// V7.37: the heated wall with the heater switched on at t = 0 (the
+/// gallery case on a coarser mesh). The heat balance closes in every step
+/// (heat.csv), the heat goes first into the wall and at the end out with
+/// the flow, and the end state is the steady solution.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release builds only (CI runs it)")]
+fn heated_wall_switched_on_reaches_the_steady_state() {
+    let coarse = |t: &str| t.replace("cells = [80, 30, 1]", "cells = [40, 15, 1]");
+    let steady = run_case(
+        &parse(&coarse(&text("cht_heated_wall.toml"))),
+        "wall_steady",
+    );
+    assert!(steady.failures.is_empty(), "{:?}", steady.failures);
+    let case = parse(&coarse(&text("cht_heated_wall_transient.toml")));
+    let dir = out("wall_transient");
+    let r = run(&case, "wall_transient", &dir, |_| {}).unwrap();
+    assert!(r.failures.is_empty(), "{:?}", r.failures);
+    let (a, b) = (temperature(&steady), temperature(&r));
+    let dt = a.max - a.min;
+    for n in ["ymin", "interface-wall", "outlet"] {
+        let (x, y) = (boundary(a, n).mean, boundary(b, n).mean);
+        assert!((x - y).abs() < 1e-3 * dt, "{n}: {y} against the steady {x}");
+    }
+    let h = r.solves[0].transient.as_ref().unwrap();
+    assert!(h.heat_relative_max.unwrap() < 1e-9, "{h:?}");
+    // the heat history: every step balanced; the wall stores most of the
+    // heat at first, almost nothing at the end
+    let text = std::fs::read_to_string(dir.join("heat.csv")).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |n: &str| head.iter().position(|h| *h == n).unwrap();
+    let (cw, cc, ci, cr) = (
+        col("wall_storage"),
+        col("conduction"),
+        col("interface-wall_heat"),
+        col("relative"),
+    );
+    let rows: Vec<Vec<f64>> = lines
+        .map(|l| l.split(',').map(|v| v.parse().unwrap()).collect())
+        .collect();
+    assert_eq!(rows.len(), 600);
+    assert!(rows.iter().all(|r| r[cr] < 1e-9));
+    let (first, last) = (&rows[0], rows.last().unwrap());
+    assert!(first[cw] > 0.95 * first[cc], "{first:?}");
+    assert!(last[cw].abs() < 1e-4 * last[cc], "{last:?}");
+    // all of the heater's 160 W through the interface
+    assert!((last[ci] / 160.0 - 1.0).abs() < 1e-4, "{last:?}");
+    // the probes: the temperature falls from the heated face to the
+    // channel; no velocity in the solid
+    let text = std::fs::read_to_string(dir.join("probes.csv")).unwrap();
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let head: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |n: &str| head.iter().position(|h| *h == n).unwrap();
+    let last: Vec<f64> = lines
+        .next_back()
+        .unwrap()
+        .split(',')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    let t = |n: &str| last[col(&format!("{n}_T"))];
+    assert!(t("heated_face") > t("interface") && t("interface") > t("channel"));
+    assert_eq!(last[col("heated_face_u")], 0.0);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The turbulent channel over a conducting wall as the fluid alone: the

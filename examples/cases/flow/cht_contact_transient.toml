@@ -1,0 +1,105 @@
+# Two semi-infinite bodies brought into contact: transient conjugate heat
+# transfer (stage 7d6, D157, check V7.6 of the stage 7 specification).
+#
+#   cargo run --release -p foehncraft-cli -- flow examples/cases/flow/cht_contact_transient.toml
+#
+# A bar 1 m long, one cell high: a solid (x < 0.5 m) at 400 K and a fluid
+# at rest (x > 0.5 m) at 300 K touch at t = 0. Both have ρ c_p = 10⁶
+# J/(m³ K); the solid conducts ten times better (k = 10 against 1 W/(m K)).
+# Until the heat reaches the ends of the bar, the bodies behave as
+# semi-infinite: the contact temperature stays at
+# T_i = (e₁ T₁ + e₂ T₂)/(e₁ + e₂) = 375.97 K with the effusivities
+# e = √(k ρ c_p), and each side follows an erf profile (Carslaw & Jaeger
+# 1959, §2.15). After 500 s the heat has gone about 0.07 m into the solid
+# and 0.02 m into the fluid. The solid and the fluid share one matrix with
+# the time terms of both; `[energy] exact` is that solution, so the report
+# gives the L2 error of the temperature, the fields its error, heat.csv the
+# heat stored per region in every step.
+#
+# The orders of the check: in space over three meshes, in time over three
+# time steps on one mesh (successive differences),
+#   --set 'verification.levels=[0, 1, 2]' --set 'mesh.generate.cells=[100, 1, 1]'
+#   --set 'verification.time_steps=[20.0, 10.0, 5.0, 2.5]'
+# The variants of tests/cht.rs: copper against air, two equal bodies.
+
+case_format = "0.6"
+
+[mesh.generate]
+type = "hex"
+dimension = 2
+upper = [1.0, 0.01, 0.01]
+cells = [400, 1, 1]
+zones = [{ name = "bar", lower = [0.0, 0.0, 0.0], upper = [0.5, 0.01, 0.01] }]
+
+[fluid]
+density = 1000.0
+viscosity = 1.0e-3
+specific_heat = 1000.0
+conductivity = 1.0
+
+[materials.bar-solid]
+kind = "solid"
+description = "a made-up solid with ρ c_p = 10⁶ J/(m³ K) and k = 10 W/(m K) (not a database material)"
+density = 1000.0
+specific_heat = 1000.0
+conductivity = 10.0
+
+[regions.bar]
+kind = "solid"
+zones = ["bar"]
+material = "bar-solid"
+
+[constants]
+T1 = 400.0                           # the solid at t = 0 (K)
+T2 = 300.0                           # the fluid at t = 0 (K)
+k1 = 10.0                            # conductivities (W/(m K))
+k2 = 1.0
+c1 = 1.0e6                           # ρ c_p (J/(m³ K))
+c2 = 1.0e6
+e1 = "sqrt(k1 * c1)"                 # effusivities
+e2 = "sqrt(k2 * c2)"
+Ti = "(e1 * T1 + e2 * T2) / (e1 + e2)"
+
+[energy]
+initial = "if(x < 0.5, T1, T2)"
+exact = "if(x < 0.5, Ti + (T1 - Ti) * erf((0.5 - x) / (2 * sqrt(k1 / c1 * t))), Ti + (T2 - Ti) * erf((x - 0.5) / (2 * sqrt(k2 / c2 * t))))"
+
+[initial]
+velocity = [0.0, 0.0, 0.0]
+
+[boundary.xmin]
+type = "wall"                        # the far end of the solid
+[boundary.xmin.energy]
+heat_flux = 0.0                      # adiabatic
+[boundary.xmax]
+type = "wall"                        # the far end of the fluid
+[boundary.xmax.energy]
+heat_flux = 0.0
+[boundary.ymin]
+type = "symmetry"
+[boundary.ymax]
+type = "symmetry"
+[boundary.zmin]
+type = "symmetry"
+[boundary.zmax]
+type = "symmetry"
+
+[time]
+scheme = "bdf2"
+time_step = 1.0
+end_time = 500.0
+
+[solver.energy]
+tolerance = 1e-12
+max_iter = 300
+
+[verification]
+scalar_max_error = 0.01              # L2 error of the temperature (K)
+scalar_order = [1.8, 2.2]            # of a sweep in space or in time
+
+[output]
+wall_csv = false
+fields_every = 50                    # the profiles every 50 s
+lines = [
+  { name = "bar", from = [0.00125, 0.005, 0.005], to = [0.99875, 0.005, 0.005], points = 400 },
+]

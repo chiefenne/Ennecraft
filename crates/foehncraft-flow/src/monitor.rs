@@ -4,7 +4,7 @@
 
 use crate::analytic::{Benchmark, Range};
 use crate::case::{BoundarySummary, FlowCase, locate, value_at};
-use crate::simplec::Solution;
+use crate::simplec::State;
 use anyhow::Result;
 use foehncraft_mesh::Geometry;
 use foehncraft_mesh::geometry::dot;
@@ -57,11 +57,21 @@ impl Probes {
 
     /// Velocity and pressure at every probe (reconstructed with the cell
     /// gradients).
-    pub fn values(&self, sol: &Solution, geo: &Geometry) -> Vec<([f64; 3], f64)> {
+    pub fn values(&self, sol: &State, geo: &Geometry) -> Vec<([f64; 3], f64)> {
         self.cells
             .iter()
             .zip(&self.points)
             .map(|(&c, &x)| value_at(sol, geo, c, x))
+            .collect()
+    }
+
+    /// The temperature of the energy equation at every probe (the value of
+    /// its cell, stage 7d6); NaN without the energy equation.
+    pub fn temperatures(&self, sol: &State) -> Vec<f64> {
+        let t = sol.scalars.iter().find(|s| s.name == crate::energy::FIELD);
+        self.cells
+            .iter()
+            .map(|&c| t.map_or(f64::NAN, |t| t.phi[c]))
             .collect()
     }
 

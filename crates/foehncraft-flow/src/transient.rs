@@ -496,6 +496,9 @@ impl Transient {
             if let Some(sc) = fl.scalars.as_mut() {
                 sc.rewind_levels(fl.dev.as_mut())?;
             }
+            if let Some((sc, dev)) = crate::cht::energy_fields(fl) {
+                sc.rewind_levels(dev)?;
+            }
             if let Some(t) = fl.turbulence.as_mut() {
                 t.rewind_levels(fl.dev.as_mut())?;
             }
@@ -543,6 +546,9 @@ impl Transient {
         fl.dev.copy(e.x_old, l.x_old)?;
         if let Some(sc) = fl.scalars.as_mut() {
             sc.step_back(fl.dev.as_mut())?;
+        }
+        if let Some((sc, dev)) = crate::cht::energy_fields(fl) {
+            sc.step_back(dev)?;
         }
         if let Some(t) = fl.turbulence.as_mut() {
             t.step_back(fl.dev.as_mut())?;
@@ -690,10 +696,20 @@ impl Transient {
                 bdf2.then(|| dt / self.clock.dt_prev),
             )?;
         }
-        let scalar_step = if fl.scalars.is_some() || fl.turbulence.is_some() {
+        let scalar_step = if fl.scalars.is_some() || fl.turbulence.is_some() || fl.cht.is_some() {
             if let Some(sc) = fl.scalars.as_mut() {
                 sc.step_start(
                     fl.dev.as_mut(),
+                    self.clock.levels >= 1,
+                    bdf2.then(|| dt / self.clock.dt_prev),
+                )?;
+            }
+            // the temperature of a conjugate case (stage 7d6): its levels
+            // in the energy view, the time terms of the fluid and the
+            // solids in one matrix
+            if let Some((sc, dev)) = crate::cht::energy_fields(fl) {
+                sc.step_start(
+                    dev,
                     self.clock.levels >= 1,
                     bdf2.then(|| dt / self.clock.dt_prev),
                 )?;

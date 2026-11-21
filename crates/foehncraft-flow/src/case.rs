@@ -2248,7 +2248,12 @@ impl<F: FnMut(&str)> Log<'_, F> {
 
 /// Velocity and pressure at `x` in cell `c`, reconstructed with the cell
 /// gradients (second order).
-pub(crate) fn value_at(fl: &Solution, geo: &Geometry, c: usize, x: [f64; 3]) -> ([f64; 3], f64) {
+pub(crate) fn value_at(
+    fl: &crate::simplec::State,
+    geo: &Geometry,
+    c: usize,
+    x: [f64; 3],
+) -> ([f64; 3], f64) {
     let r = sub(x, geo.cell_centroid[c]);
     let u = fl.u.get(c);
     let g = [

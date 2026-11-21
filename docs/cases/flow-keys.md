@@ -87,7 +87,7 @@ line (recipe 26).
 | `output.fields_every` | 0 | transient: write `fields_<step>.vtkhdf` every N steps (0: only the final `fields.vtkhdf`) |
 | `output.fields_at` | none | transient: also write the fields at these steps |
 | `output.fields_interval`, `output.fields_times` | none | transient: also write the fields at the multiples of this simulated time (s) and at these times; the steps land on them exactly (D66) |
-| `output.monitor_every` | 1 | a row of `forces.csv` and `probes.csv` every N steps |
+| `output.monitor_every` | 1 | a row of `forces.csv` and `probes.csv` every N steps (`probes.csv` has `<probe>_T`, the temperature of the probe's cell, with the energy equation; in a conjugate case the probes are found on the whole mesh, solids included) |
 | `output.monitor_interval` | none | transient: a row of `forces.csv` and `probes.csv` at the multiples of this simulated time (s) instead of every `monitor_every` steps, landed on exactly (equally spaced samples for spectra, D66) |
 | `output.probes` | none | point probes `[[output.probes]]` with `name` and `point`: velocity and pressure in `probes.csv`; with a turning zone also the velocity relative to it, `<name>_u_rel`, `_v_rel`, `_w_rel` (D183) |
 | `output.wall_probes` | none | wall probes `[[output.wall_probes]]` with `name`, `boundary`, `point`: wall shear stress, C_f (with `output.reference.velocity`), y⁺ and the wall value and flux of each passive scalar (the Nusselt number of a heated wall, 6g) at a point of a wall, in the report and the uncertainty table of a level sweep |
@@ -438,8 +438,10 @@ of the expression language instead of a number. The variables are `x`,
 constants `pi`, `e` and those of `[constants]`; the operators
 `+ - * / % ^` (also `**`), `< <= > >= == !=`, `and or not` (true is 1);
 the functions `sin cos tan asin acos atan sinh cosh tanh exp log log10
-sqrt abs floor ceil round sign` (one argument; `log` is the natural
-logarithm), `atan2 pow min max hypot step` (two; `step(a, b)` is 1 where
+sqrt abs floor ceil round sign erf erfc` (one argument; `log` is the
+natural logarithm, `erf` the error function and `erfc` = 1 − erf, for the
+exact solutions of transient conduction), `atan2 pow min max hypot step`
+(two; `step(a, b)` is 1 where
 a ≥ b), `clamp(a, lo, hi)`, `if(condition, a, b)` and every
 `[tables.<name>]` as a function of one argument. Each string is checked
 and compiled when the case is read; the solver evaluates the compiled

@@ -7,6 +7,7 @@ Part of the [Recipes](../recipes.md): the energy equation of the fluid (stage 7,
 | 154 | [Solve the temperature of a flow with temperature-dependent properties](#energy-fluid) |
 | 156 | [Couple the temperature of a fluid and a solid (conjugate heat transfer)](#cht-solids) |
 | 158 | [Couple a turbulent flow with a solid (turbulent conjugate heat transfer)](#cht-turbulent) |
+| 159 | [Follow how a solid and a fluid heat up together (transient conjugate heat transfer)](#cht-transient) |
 
 ---
 
@@ -172,9 +173,10 @@ refuses:
   density, specific heat or conductivity (MAT006);
 - a zone the mesh does not have (REG002);
 - solid regions without `[energy]` (REG001);
-- solids together with a time loop, a restart or passive scalars, an
+- solids together with a sliding mesh, a restart or passive scalars, an
   orthotropic solid conductivity, a periodic mesh, or a mesh with no fluid
-  cell (ENE006). A turbulence model is allowed since PR 158 (recipe 158).
+  cell (ENE006). A turbulence model is allowed since PR 158 (recipe 158),
+  a time loop since PR 159 (recipe 159).
 
 ```
 cargo build --release -p foehncraft-cli
@@ -185,7 +187,7 @@ target/release/foehn flow examples/cases/flow/cht_heated_wall.toml --out output/
 ```
 
 **Limits of this step.** Steady conjugate cases only (turbulent ones
-since PR 158, recipe 158). The
+since PR 158, recipe 158; transient ones since PR 159, recipe 159). The
 gradients next to an interface still use the cell across it, so the
 interface is exact on orthogonal meshes; the one-sided gradients of D157
 follow. No contact resistance and no orthotropic k yet (7d2), no
@@ -245,7 +247,82 @@ target/release/foehn flow examples/cases/flow/cht_heat_sink_turbulent.toml --out
 ```
 
 **Limits of this step.** Steady only (transient conjugate heat transfer
-is PR 7d6). The interface takes the wall function of the momentum
+since PR 159, recipe 159). The interface takes the wall function of the momentum
 treatment of the flow; a wall-resolved mesh on the fluid side needs
 y⁺ ≲ 1 like any wall. The turbulence fields are not written on the whole
 mesh yet (velocity, pressure and temperature are).
+
+<a id="cht-transient"></a>
+## 159. Follow how a solid and a fluid heat up together (transient conjugate heat transfer)
+
+**The case.** A conjugate case of recipe 156 or 158 with a `[time]`
+table. The solid regions need nothing new: their density and specific
+heat, which a steady run does not use, now set how much heat they store.
+
+```toml
+[time]
+scheme = "bdf2"                # or "crank-nicolson", "bdf1"
+time_step = 5.0
+end_time = 3000.0
+
+[solver]
+outer_iterations = 3           # the flow at Courant numbers far above 1
+
+[solver.momentum]
+relaxation = 0.9
+```
+
+The time step follows the heat-up of the solid, not the flow: a wall of
+heat capacity ρ c_p t per area that loses heat with h to the flow warms
+with the time constant ρ c_p t/h, often minutes, while the flow passes in
+seconds. At Courant numbers of 10 to 100 the flow needs two or three outer
+iterations per step and a momentum relaxation below 1 (with one outer
+iteration the relaxation must be 1, CASE005). A flow that does not
+change, as here, settles in the first steps; the energy equation of all
+regions is solved in every step to `[solver.energy] tolerance`. The
+temperature takes BDF2 whatever the scheme of the flow, as every scalar
+([recipe 63](scalars.md#passive-scalars)), so a Crank–Nicolson run gives the same second
+order in time.
+
+**What happens.** The fluid and the solid cells share one matrix with the
+time terms of both, ρ c_p V/Δt of each cell's own material, so the heat
+flow through an interface and the heat stored on its two sides come from
+the same solve; there is no coupling iteration between a fluid and a
+solid solver and no time lag at the interface. The time levels of the
+temperature follow those of the flow: an adaptive step, a rejected step
+(D65) and the return to the last valid state (D63) rewind the solid with
+the fluid.
+
+**The output.**
+- `heat.csv`: the heat balance of every step, what the boundaries bring
+  in by conduction and with the flow, the sources, the heat stored in the
+  step per region (`fluid_storage`, `<region>_storage`), the heat flow
+  through every interface (`interface-<region>_heat`, into the fluid),
+  the imbalance and its ratio to the largest flow. The run record
+  (`run.jsonl`) carries the same per step under `heat`.
+- `probes.csv`: `<probe>_T`, the temperature of the probe's cell, also in
+  a solid (velocity and pressure are zero there, as in the fields).
+- `fields_<step>.vtkhdf` (`fields_every`) on the whole mesh.
+- the report: the largest relative imbalance of a step
+  (`transient.heat_relative_max`) and the heat stored per region in the
+  last step.
+
+**An exact solution.** `[energy] exact` takes `erf` and `erfc`, so a
+conduction problem with an exact solution reports the L2 error of the
+temperature and, with `[verification] levels` or `time_steps`, the
+observed orders (`scalar_order`); `cht_contact_transient.toml` (two bodies
+brought into contact) does this.
+
+```
+cargo build --release -p foehncraft-cli
+target/release/foehn flow examples/cases/flow/cht_heated_wall_transient.toml --out output/cht_wall_t
+target/release/foehn flow examples/cases/flow/cht_contact_transient.toml --out output/cht_contact
+target/release/foehn flow examples/cases/flow/cht_contact_transient.toml --out output/cht_contact_time \
+    --set 'verification.time_steps=[20.0, 10.0, 5.0, 2.5]'
+```
+
+**Limits of this step.** No sliding meshes with solids, no restart of a
+conjugate run yet, and the turbulence fields are not written on the whole
+mesh. A periodic flow whose solid only follows the cycle-average (an
+exhaust manifold over an engine cycle) is the cycle-averaged coupling of
+D204, which comes later; until then such a case runs the full transient.

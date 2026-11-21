@@ -1214,7 +1214,7 @@ the maintainer; values given here are those of the cited papers.
 | V7.3 | Adiabatic stirred box (lid-driven cavity, all walls adiabatic, transient) | rise of ∫ρh dV against the lid work minus the change of kinetic energy; entropy rise against ∫Φ/T | ledger per step to the tolerance of D89; entropy production ≥ 0 per cell |
 | V7.4 | 1D composite wall of three solids, k ratios 1, 10², 10⁴, with and without contact resistance, on meshes whose cells do not line up with the layers in the transverse direction | T, interface temperatures, heat flux | error ≤ 10⁻⁹ relative to ΔT on every mesh type, perturbed (exact for piecewise-linear T, §9.2) |
 | V7.5 | Composite cylinder, radial conduction through two materials with a curved interface, ratios 1 to 10⁴, Robin outer surface | T, interface heat flow | order 1.8–2.2; heat flow equal on both sides to round-off; AMG iterations as in §10.2 |
-| V7.6 | Two semi-infinite bodies brought into contact (copper and air; and two equal solids): constant interface temperature T_i = (e₁T₁ + e₂T₂)/(e₁ + e₂), e = √(kρc_p), erfc profiles (Carslaw & Jaeger 1959, §2.15) | T_i(t), profiles | T_i within 0.1 % of ΔT after the first 10 steps; time order 1.8–2.2 (BDF2, Crank–Nicolson) and space order 1.8–2.2 |
+| V7.6 | Two semi-infinite bodies brought into contact (copper and air; and two equal solids): constant interface temperature T_i = (e₁T₁ + e₂T₂)/(e₁ + e₂), e = √(kρc_p), erfc profiles (Carslaw & Jaeger 1959, §2.15) | T_i(t), profiles | T_i within 0.1 % of ΔT after the first 10 steps; time order 1.8–2.2 (BDF2, Crank–Nicolson) and space order 1.8–2.2. **Met 2026-11-21 (#159)** with a solid against a fluid at rest (`cht_contact_transient.toml`): T_i within 3·10⁻³ K after 10 steps, orders 2.02/2.00 in space and 2.05/2.02 in time; copper–air, and equal bodies at 350 K to round-off (`tests/cht.rs`) |
 | V7.7 | Hydrostatics: closed box at rest, (a) Boussinesq with a stable linear stratification, (b) variable-density isothermal gas column, (c) two regions of different constant densities (a density step), gravity oblique to the mesh axes | velocity, reduced and static pressure | max |u| ≤ 10⁻¹⁰ √(g L) after 1000 iterations on all four types, perturbed; static pressure equals the hydrostatic profile to round-off for (b) and (c) |
 | V7.8 | Rayleigh–Bénard onset between rigid plates: growth rates of a small disturbance at Ra slightly below and above onset, critical Ra by interpolation | Ra_c | reference 1707.76 (Chandrasekhar 1961); within 0.5 % on the finest mesh; GCI(Ra_c) ≤ 0.5 % |
 | V7.9 | Fully developed mixed convection in a vertical channel with walls at different temperatures, aiding and opposing flow, with flow reversal (Aung & Worku 1986) | velocity and temperature profiles | order 1.8–2.2 against the analytic solution |
@@ -1280,7 +1280,7 @@ Added 2026-11-21 (maintainer: turbulent and transient CHT before 7b1 and
 | # | Case | Checks | Pass band |
 |---|---|---|---|
 | V7.36 | Turbulent channel (Re 2·10⁵, Pr 0.71) over a meshed solid wall whose resistance t/k_s is of the order of the fluid side's 1/h_w, outer face of the wall at a fixed temperature, k-ε (scalable) and SST (automatic) with the thermal wall function at the interface (7d5, `cht_turbulent_channel.toml`); against the same channel without the solid, whose wall carries the wall function in series with a convection condition h = k_s/t (the fluid-only path of 6f) | heat flow through the interface and the outer face; interface temperature; outlet bulk temperature; temperature drop across the wall; heat balance | interface heat flow equal to that of the outer face to 10⁻⁶; heat flow within 10⁻³ and interface temperature within 0.02 K of the fluid-only run; T_o − T_i = q t/k_s to 10⁻³; balance below 10⁻⁸ (`tests/cht.rs`). Changed from the first draft (a pipe in a steel tube against Gnielinski ±10 %): the comparison with the independent path tests the interface itself to 10⁻³, the Nusselt numbers of the wall function are checked in 6f |
-| V7.37 | Heated solid wall under a laminar channel flow, heater switched on at t = 0 (the 7d1 case `cht_heated_wall` run transient, 7d6) | heat balance per step: input = outflow + storage in fluid and solid; approach to the steady solution | balance to the solver tolerance in every step; the end state within 0.1 % of ΔT of the steady 7d1 result |
+| V7.37 | Heated solid wall under a laminar channel flow, heater switched on at t = 0 (the 7d1 case `cht_heated_wall` run transient with a lighter wall, ρ = 100, 7d6, `cht_heated_wall_transient.toml`) | heat balance per step: input = outflow + storage in fluid and solid; approach to the steady solution | balance to the solver tolerance in every step; the end state within 0.1 % of ΔT of the steady 7d1 result. **Met 2026-11-21 (#159):** 1.9·10⁻¹¹ in every step, end state within 1.5·10⁻⁵ of ΔT (`tests/cht.rs`) |
 | V7.38 | Slab with a periodic gas temperature and heat-transfer coefficient on one face, a fixed temperature on the other (D204) | mean temperature profile after the loop; surface swing with `skin = "effusivity"` | mean profile within 0.5 % of ΔT of the fully coupled transient run in its periodic state after ≤ 3 updates; swing amplitude within 2 % of the Fourier solution |
 | V7.39 | Pulsating laminar channel flow (inlet velocity and temperature periodic) over a thick conducting wall (D204) | interface heat flow, wall temperature | within 1 % of the fully coupled transient conjugate run in its periodic state; wall-clock time of both reported |
 | V7.40 | Ledger of the cycle-averaged loop (D204) | heat balance of the solid per update; cycle-mean fluid balance with the change of stored heat | solid to the solver tolerance; fluid within 10⁻⁶ relative |
@@ -1472,7 +1472,7 @@ CHT lane (C) run in parallel.
 | C | 7d4 | METIS with two constraints, per-view halo plans | V7.24 |
 | C | 7t2 | Shell conduction and baffles (D189), surface mesh W1 and wall-face halo W2, film slots (D190) | V7.28–V7.32 |
 | C | 7d5 | Turbulent CHT: thermal wall function (D135) on the fluid side of every interface in series with the solid half cell (§9.4), turbulent conductivity c_p μ_t/Pr_t in the energy view (done, #158) | V7.36 |
-| C | 7d6 | Transient CHT: time terms of the fluid and the solids in the one energy matrix, heat storage in the balance, output and probes on the full mesh | V7.6, V7.37 |
+| C | 7d6 | Transient CHT: time terms of the fluid and the solids in the one energy matrix, heat storage in the balance, output and probes on the full mesh (done, #159) | V7.6, V7.37 |
 | C | later | Cycle-averaged coupling of periodic flows (D204, §9d), after 7d6; not sized yet | V7.38–V7.40 |
 | D | 7e1 | `buoyancy_production` hook in k, ε, ω, ζ/φ (not delivered by stage 6), G_b with SGDH, C_ε3 | V7.25, V7.18 (SGDH, reported) |
 | D | 7e2 | GGDH, G_b with GGDH | V7.18, V7.19, V7.21 |
@@ -1516,6 +1516,30 @@ matrix indefinite in the first iterations (a flow-solver item, not of the
 conjugate coupling; the gallery case starts from rest). Moved to a later
 PR: the turbulence fields on the whole mesh in the output, y⁺ and T⁺ of
 the interfaces as derived fields (D72).
+
+**7d6 done 2026-11-21 (#159):** transient conjugate heat transfer. The
+fluid and the solid cells share the one energy matrix with the time terms
+ρ c_p V/Δt of their own materials (BDF2, also under Crank–Nicolson as for
+every scalar); the temperature's time levels in the energy view follow
+those of the flow (step start, rejected steps of D65, the rewind of
+D63). The balance has the heat stored per region; `heat.csv` writes it
+per step with the heat flow of each interface, the run record carries it,
+and the report gives the largest relative imbalance of a step. Probes
+give the temperature, on the whole mesh in a conjugate case, and
+`fields_<step>` are written there. The expression language gained `erf`
+and `erfc` (in-house, D93 (6)), so `[energy] exact` carries the erf
+solutions. Results: V7.6 with the interface at T_i to 10⁻¹² K at 500 s
+(within 3·10⁻³ K, 0.003 % of ΔT, after 10 steps), the copper–air and
+equal-body variants, L2 error 0.0784/0.0193/0.0048 K on 100/200/400
+cells (orders 2.02, 2.00) and time orders 2.05, 2.02 (BDF2 and
+Crank–Nicolson alike); V7.37 with the balance closed to 1.9·10⁻¹¹ in
+every one of 600 steps and the end state within 1.5·10⁻⁵ of ΔT of the
+steady 7d1 result. Found on the way: transient sweeps did not check the
+scalars against their exact solutions (now as in steady runs), and a time
+sweep of a conjugate case would have read the temperature on the fluid
+mesh only (fixed before it could be hit). Still open: restart of a
+conjugate run, solids with a sliding mesh, the turbulence fields on the
+whole mesh.
 
 **Decided 2026-11-21 (maintainer):** turbulent and transient conjugate heat
 transfer (7d5, 7d6) come before 7b1 and 7d2, as the more industry-relevant

@@ -838,6 +838,9 @@ pub struct Scalars {
     rho_volume: Vec<f64>,
     /// The last boundary time the time-dependent values were set for.
     t_set: f64,
+    /// The time terms of the last step solved (the heat storage of the
+    /// balance, stage 7d6).
+    last_step: Option<StepTime>,
 }
 
 impl Scalars {
@@ -1140,6 +1143,7 @@ impl Scalars {
             rho_area: (ni..nf).map(|f| rho * geo.normal_area(f).1).collect(),
             rho_volume: geo.cell_volume[..nc].iter().map(|v| rho * v).collect(),
             t_set: f64::NAN,
+            last_step: None,
         };
         let cells: Vec<[f64; 3]> = geo.cell_centroid[..nc].to_vec();
         s.set_values(dev, &cells, 0.0, true)?;
@@ -1238,6 +1242,9 @@ impl Scalars {
             && st.time != self.t_set
         {
             self.set_values(dev, cells, st.time, false)?;
+        }
+        if step.is_some() {
+            self.last_step = step;
         }
         let tr = step.is_some();
         let time_now = step.map_or(0.0, |st| st.time);
@@ -1683,6 +1690,50 @@ impl Scalars {
         })
     }
 
+    /// The heat stored per region in the last time step (W, transient runs,
+    /// stage 7d6): Σ ρ V (a₀ h_s(T) + a₁ h_s(Tⁿ) + a₂ h_s(Tⁿ⁻¹))/Δt over
+    /// the cells of each region (`fluid` first), the time terms the energy
+    /// equation was solved with; `None` in a steady run.
+    pub fn energy_storage(&self, dev: &mut dyn FlowDevice) -> Result<Option<Vec<RegionHeat>>> {
+        let Some(st) = self.last_step else {
+            return Ok(None);
+        };
+        let Some(f) = self.fields.iter().find(|f| f.energy.is_some()) else {
+            return Ok(None);
+        };
+        let (Some(e), Some((o1, o2, _))) = (f.energy.as_deref(), f.old) else {
+            return Ok(None);
+        };
+        let t = dev.download(f.phi)?;
+        let t1 = dev.download(o1)?;
+        let t2 = if st.a[2] != 0.0 {
+            dev.download(o2)?
+        } else {
+            vec![0.0; t.len()]
+        };
+        let [a0, a1, a2] = st.a;
+        let mut per = vec![0.0; e.regions.len()];
+        for c in 0..e.mat_cell.len() {
+            let m = e.mat_cell[c] as usize;
+            let h = &e.h[m];
+            let mut l = a0 * h.at(t[c]) + a1 * h.at(t1[c]);
+            if a2 != 0.0 {
+                l += a2 * h.at(t2[c]);
+            }
+            per[m] += e.mats[m].rho * e.volume[c] * l / st.dt;
+        }
+        Ok(Some(
+            e.regions
+                .iter()
+                .zip(per)
+                .map(|(r, s)| RegionHeat {
+                    region: r.clone(),
+                    storage: s,
+                })
+                .collect(),
+        ))
+    }
+
     /// The heat flow into the fluid through the faces between the fluid
     /// and each solid region (W, the orthogonal part of the conduction, as
     /// the boundary report), with the area and the area-mean face
@@ -1748,6 +1799,16 @@ impl Scalars {
             }
         }
         Ok(out)
+    }
+
+    /// The regions of the energy equation (`fluid` first, then the solid
+    /// regions), the order of [`Scalars::energy_storage`]; empty without
+    /// the energy equation.
+    pub fn energy_regions(&self) -> Vec<String> {
+        self.fields
+            .iter()
+            .find_map(|f| f.energy.as_deref().map(|e| e.regions.clone()))
+            .unwrap_or_default()
     }
 
     /// The laminar viscosity μ(T) per face of the energy equation's last
@@ -2463,12 +2524,28 @@ pub struct EnergyBalance {
     pub convection: f64,
     /// The heat sources q''' + Φ over the volume (W).
     pub source: f64,
-    /// conduction + convection + source (W): zero in a converged steady
-    /// run (a transient run also stores heat).
+    /// The heat stored in the last time step (W), transient runs (stage
+    /// 7d6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<f64>,
+    /// The stored heat per region (`fluid` first, then the solid regions).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub storage_regions: Vec<RegionHeat>,
+    /// conduction + convection + source − storage (W): zero in a
+    /// converged steady run and in every converged time step.
     pub imbalance: f64,
-    /// |imbalance| over the largest single heat flow of a boundary or the
-    /// source.
+    /// |imbalance| over the largest single heat flow of a boundary, the
+    /// source or the storage.
     pub relative: f64,
+}
+
+/// The heat stored in a region in the last time step (stage 7d6).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RegionHeat {
+    /// The region (`fluid` or a solid region).
+    pub region: String,
+    /// The heat stored (W).
+    pub storage: f64,
 }
 
 /// A scalar in the report of a solve.
@@ -2612,10 +2689,23 @@ pub fn summaries(
                 });
             }
         }
+        let stored = match heat {
+            Some(_) => sc.energy_storage(fl.dev.as_mut())?,
+            None => None,
+        };
         let energy = heat.as_ref().map(|(_, src)| {
             bal.source = *src;
             largest = largest.max(src.abs());
-            bal.imbalance = bal.conduction + bal.convection + bal.source;
+            let total: f64 = stored.iter().flatten().map(|r| r.storage).sum();
+            if let Some(rs) = &stored {
+                bal.storage = Some(total);
+                largest = largest.max(total.abs());
+                for r in rs {
+                    largest = largest.max(r.storage.abs());
+                }
+                bal.storage_regions = rs.clone();
+            }
+            bal.imbalance = bal.conduction + bal.convection + bal.source - total;
             bal.relative = if largest > 0.0 {
                 bal.imbalance.abs() / largest
             } else {
@@ -2725,9 +2815,23 @@ pub fn summary_line(s: &ScalarSummary) -> String {
     }
     if let Some(e) = &s.energy {
         l.push_str(&format!(
-            "; heat balance: conduction {:.6e} W, convection {:.6e} W, sources {:.6e} W, \
-             imbalance {:.3e} W ({:.2e} of the largest flow)",
-            e.conduction, e.convection, e.source, e.imbalance, e.relative
+            "; heat balance: conduction {:.6e} W, convection {:.6e} W, sources {:.6e} W, ",
+            e.conduction, e.convection, e.source
+        ));
+        if let Some(st) = e.storage {
+            let per: Vec<String> = e
+                .storage_regions
+                .iter()
+                .map(|r| format!("{} {:.6e} W", r.region, r.storage))
+                .collect();
+            l.push_str(&format!(
+                "storage in the last step {st:.6e} W ({}), ",
+                per.join(", ")
+            ));
+        }
+        l.push_str(&format!(
+            "imbalance {:.3e} W ({:.2e} of the largest flow)",
+            e.imbalance, e.relative
         ));
     }
     l

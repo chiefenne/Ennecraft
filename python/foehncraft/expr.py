@@ -207,6 +207,7 @@ VARIABLES = ("x", "y", "z", "t")
 FUNCTIONS1 = (
     "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
     "exp", "log", "log10", "sqrt", "abs", "floor", "ceil", "round", "sign",
+    "erf", "erfc",
 )  # fmt: skip
 FUNCTIONS2 = ("atan2", "pow", "min", "max", "hypot", "step")
 #: Names of solution fields that later stages bring into expressions.
@@ -294,6 +295,16 @@ def sqrt(a):
 
 def sign(a):
     return _call("sign", a)
+
+
+def erf(a):
+    """The error function."""
+    return _call("erf", a)
+
+
+def erfc(a):
+    """The complementary error function 1 - erf."""
+    return _call("erfc", a)
 
 
 def floor(a):

@@ -108,6 +108,10 @@ pub mod fn1 {
     pub const ROUND: u32 = 16;
     /// −1, 0, 1.
     pub const SIGN: u32 = 17;
+    /// The error function.
+    pub const ERF: u32 = 18;
+    /// The complementary error function 1 − erf.
+    pub const ERFC: u32 = 19;
 }
 
 /// Two-argument functions of [`op::FN2`].
@@ -174,6 +178,8 @@ fn call1(f: u32, a: f64) -> f64 {
         fn1::CEIL => m::ceil(a),
         fn1::ROUND => m::round(a),
         fn1::SIGN => m::sign(a),
+        fn1::ERF => m::erf(a),
+        fn1::ERFC => m::erfc(a),
         _ => f64::NAN,
     }
 }

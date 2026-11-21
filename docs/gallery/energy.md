@@ -7,6 +7,7 @@ Part of the [Example gallery](../gallery.md): the energy equation of the fluid (
 | 154 | [A heated cavity, conduction with k(T) and a Couette flow heated by its friction](#energy-fluid) | 7 | `[energy]`, `[boundary.<name>.energy]`, `[fluid] specific_heat`, `conductivity`, `viscous_heating`, `temperature_dependent`, `[solver.energy]` |
 | 156 | [A heated wall cooled by a channel flow, and a composite wall](#cht-solids) | 7 | `[regions.<name>] kind = "solid"`, `[materials.<name>] kind = "solid"`, `[mesh.generate] zones`, `interface-<region>` |
 | 158 | [A finned heat sink in a turbulent air channel, and a turbulent channel over a conducting wall](#cht-turbulent) | 7 | `[turbulence]` with solid regions, `[energy] wall_function`, `turbulent_prandtl` |
+| 159 | [A heated wall switched on, and two bodies brought into contact](#cht-transient) | 7 | `[time]` with solid regions, `heat.csv`, `<probe>_T`, `[energy] exact` with `erf` |
 
 ---
 
@@ -191,3 +192,58 @@ python3 -m tools.plot.cht_turbulent docs/figures/gallery output/cht_sink \
     output/cht_channel_keps output/cht_channel_sst
 ```
 
+<a id="cht-transient"></a>
+## 159. A heated wall switched on, and two bodies brought into contact
+
+<img src="../figures/gallery/cht_heated_wall_transient.png" alt="Left: the temperature of the heated wall and the channel flow above it at 300 s, 900 s and 3000 s after the heater under the wall was switched on; the wall warms from 300 K to about 324 K at the outlet end and a warm layer grows in the fluid above it. Right: the heat flows of every step over 3000 s; the heat stored in the wall starts at the heater's 160 W and decays, while the heat through the interface and the heat carried out by the flow rise towards 160 W" width="800" height="395">
+
+**A heated wall switched on (check V7.37).**
+`cht_heated_wall_transient.toml` is the heated wall of entry 156 with a
+`[time]` table: everything starts at 300 K and the flow at rest, and at
+t = 0 the 1000 W/m² under the wall switch on. The wall is made lighter
+(ρ = 100 kg/m³, the conductivity unchanged), so that its heat capacity of
+16 kJ/(m² K) against the 50 to 60 W/(m² K) to the flow gives a time
+constant of about 4 min; the steady temperatures do not depend on ρ c_p.
+600 BDF2 steps of 5 s (Courant numbers up to 150, three outer iterations
+per step) take 16 s on 4 threads. At first the wall stores almost all of
+the heater's 160 W; the stored heat decays with a time constant of 263 s,
+and after 3000 s it is 2·10⁻³ W, the interface passes 159.998 W and the
+flow carries 157.74 W out (the other 2.25 W leave by conduction through
+the inlet, where the fluid is held at 300 K). The heat balance of
+`heat.csv` closes in every step to 1.9·10⁻¹¹ of the heat flow, and the end
+state is the steady solution of entry 156: every cell within 1.5·10⁻⁵ of
+the temperature range (the heated face 318.529 K against 318.529 K, the
+interface 317.109 K against 317.109 K).
+
+<img src="../figures/gallery/cht_contact_transient.png" alt="Left: the temperature along a bar at 50 s, 150 s and 500 s after a solid at 400 K and a fluid at rest at 300 K were brought into contact at x = 0.5 m; the cell values lie on the exact erf profiles, the interface stays at 375.97 K and the heat reaches further into the better-conducting solid. Right: the L2 error of the temperature at 500 s over the cell size on three meshes, on a line of slope 2, with the observed orders 2.00 in space and 2.02 in time" width="800" height="274">
+
+**Two bodies brought into contact (check V7.6).**
+`cht_contact_transient.toml` is a bar 1 m long: a solid at 400 K
+(k = 10 W/(m K)) and a fluid at rest at 300 K (k = 1), both with
+ρ c_p = 10⁶ J/(m³ K), touch at t = 0. Until the heat reaches the ends,
+both are semi-infinite bodies: the contact temperature is
+T_i = (e₁T₁ + e₂T₂)/(e₁ + e₂) = 375.975 K with the effusivities
+e = √(kρc_p) from the first moment on, and each side follows an erf
+profile (Carslaw & Jaeger 1959, §2.15), which the case gives as
+`[energy] exact` (the expression language has `erf` and `erfc` since this
+PR). On 400 cells with Δt = 1 s the interface is within 3·10⁻³ K of T_i
+after 10 steps and at T_i to 10⁻¹² K at 500 s, and the heat flow through
+it is e₁(T₁ − T_i)/√(πt) to 6·10⁻⁴; what the solid loses
+the fluid stores, in every step. The L2 error is 0.0784, 0.0193 and
+0.0048 K on 100, 200 and 400 cells, second order (2.02, 2.00), and four
+time steps from 20 s to 2.5 s give the time order of BDF2 (2.05, 2.02).
+Copper against air (the contact stays at 399.985 K, the copper's
+temperature) and two equal bodies (350 K to round-off) are the variants
+of `tests/cht.rs`.
+
+```
+cargo build --release -p foehncraft-cli
+target/release/foehn flow examples/cases/flow/cht_heated_wall_transient.toml --out output/cht_wall_t
+target/release/foehn flow examples/cases/flow/cht_contact_transient.toml --out output/cht_contact
+target/release/foehn flow examples/cases/flow/cht_contact_transient.toml --out output/cht_contact_space \
+    --set 'verification.levels=[0, 1, 2]' --set 'mesh.generate.cells=[100, 1, 1]'
+target/release/foehn flow examples/cases/flow/cht_contact_transient.toml --out output/cht_contact_time \
+    --set 'verification.time_steps=[20.0, 10.0, 5.0, 2.5]'
+python3 -m tools.plot.cht_transient docs/figures/gallery output/cht_wall_t output/cht_contact \
+    output/cht_contact_space output/cht_contact_time
+```

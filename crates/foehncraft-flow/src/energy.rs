@@ -307,10 +307,9 @@ pub fn validate(case: &crate::case::FlowCase, env: &Env) -> Result<()> {
     }
     if crate::cht::is_cht(case) {
         crate::need!(
-            !transient,
+            case.sliding.is_empty(),
             ENE_UNSUPPORTED,
-            "solid regions in a transient case: conjugate heat transfer is steady in this \
-             version"
+            "solid regions with a sliding mesh ([[sliding]]) are not in this version"
         );
         crate::need!(
             case.run.restart.is_none(),

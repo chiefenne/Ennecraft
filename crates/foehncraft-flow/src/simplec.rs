@@ -1601,6 +1601,10 @@ impl Flow {
         if let Some(sc) = self.scalars.as_mut() {
             sc.keep_valid(self.dev.as_mut())?;
         }
+        // the temperature of a conjugate case lives in the energy view
+        if let Some((sc, dev)) = crate::cht::energy_fields(self) {
+            sc.keep_valid(dev)?;
+        }
         if let Some(t) = self.turbulence.as_mut() {
             t.keep_valid(self.dev.as_mut())?;
         }
@@ -1620,6 +1624,9 @@ impl Flow {
         self.dev.copy(m, self.f.mass_flux)?;
         if let Some(sc) = self.scalars.as_mut() {
             sc.rewind(self.dev.as_mut())?;
+        }
+        if let Some((sc, dev)) = crate::cht::energy_fields(self) {
+            sc.rewind(dev)?;
         }
         if let Some(t) = self.turbulence.as_mut() {
             t.rewind(self.dev.as_mut())?;

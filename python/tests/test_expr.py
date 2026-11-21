@@ -66,6 +66,10 @@ def test_values_of_the_solver():
             lambda a, b, c, d: math.tanh(a) if (a > 0 or c < 0) else min(max(c, -0.5), 0.5),
         ),
         (
+            E.erf(x) + E.erfc(y),
+            lambda a, b, c, d: math.erf(a) + math.erfc(b),
+        ),
+        (
             E.step(x, 0.25) + abs(z) + E.sign(z),
             lambda a, b, c, d: (1.0 if a >= 0.25 else 0.0) + abs(c) + math.copysign(1.0, c),
         ),

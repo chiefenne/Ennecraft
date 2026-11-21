@@ -140,6 +140,22 @@ pub struct TransientSummary {
     pub stopped: bool,
     /// Nanoseconds per cell and time step.
     pub ns_per_cell_step: f64,
+    /// The energy equation (stage 7d6): the largest relative heat
+    /// imbalance of a step (|imbalance| over the largest heat flow, the
+    /// `relative` column of `heat.csv`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heat_relative_max: Option<f64>,
+}
+
+/// The heat balance of one time step (stage 7d6): the balance of the
+/// energy equation and the heat flow through each interface of a
+/// conjugate case (W, into the fluid, the order of `heat.csv`).
+#[derive(Debug, Clone, Serialize)]
+struct StepHeat {
+    #[serde(flatten)]
+    balance: crate::scalar::EnergyBalance,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    interfaces: Vec<f64>,
 }
 
 /// Time-dependent boundary faces: boundary index and the face.
@@ -266,8 +282,11 @@ struct RunSpec {
 struct RunOut {
     solve: Solve,
     u: Soa3,
-    /// Final scalar fields, in the order of the case's scalar sections.
+    /// Final scalar fields, in the order of the case's scalar sections
+    /// (on the full mesh in a conjugate case).
     scalars: Vec<Vec<f64>>,
+    /// The cell volumes of `scalars`.
+    scalar_volume: Vec<f64>,
     volume: Vec<f64>,
     stopped: bool,
 }
@@ -334,6 +353,10 @@ pub fn run(
     let last = specs.len() - 1;
     for (ri, spec) in specs.iter().enumerate() {
         let (mesh, geo, desc) = mesh_for(case, spec.level)?;
+        // conjugate heat transfer (stage 7d6): the flow runs on the fluid
+        // view, the energy equation on the full mesh
+        let (view_case, mesh, geo) = crate::cht::view(case, mesh, geo)?;
+        let case = &view_case;
         let values = case.compiled_boundaries()?;
         let mut findings = bc::check(
             &mesh,
@@ -462,10 +485,10 @@ pub fn run(
                 .map(|w| {
                     let (a, b) = (&w[0], &w[1]);
                     let (mut e2, mut vol) = (0.0, 0.0);
-                    for c in 0..a.volume.len() {
+                    for c in 0..a.scalar_volume.len() {
                         let x = a.scalars[k][c] - b.scalars[k][c];
-                        e2 += x * x * a.volume[c];
-                        vol += a.volume[c];
+                        e2 += x * x * a.scalar_volume[c];
+                        vol += a.scalar_volume[c];
                     }
                     (e2 / vol).sqrt()
                 })
@@ -489,58 +512,62 @@ pub fn run(
             }
             rep.scalar_orders.push((format!("{} (time)", sm.name), o));
         }
-        rep.time_orders = diffs
-            .windows(2)
-            .enumerate()
-            .map(|(i, d)| (d[0] / d[1]).ln() / (dts[i] / dts[i + 1]).ln())
-            .collect();
-        lg.note(&format!(
-            "time sweep: differences of successive solutions [{}], observed time orders {:.3?}",
-            diffs
-                .iter()
-                .map(|d| format!("{d:.3e}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            rep.time_orders
-        ));
-        if let (Some([lo, hi]), Some(&o)) = (v.expected_time_order, rep.time_orders.last())
-            && !(lo..=hi).contains(&o)
-        {
-            rep.failures.push(format!(
-                "observed time order {o:.3} on the smallest steps, outside [{lo}, {hi}]"
+        // a fluid at rest (the conduction of a conjugate case) gives no
+        // velocity differences and no order of them
+        if diffs.iter().any(|&d| d > 0.0) {
+            rep.time_orders = diffs
+                .windows(2)
+                .enumerate()
+                .map(|(i, d)| (d[0] / d[1]).ln() / (dts[i] / dts[i + 1]).ln())
+                .collect();
+            lg.note(&format!(
+                "time sweep: differences of successive solutions [{}], observed time orders {:.3?}",
+                diffs
+                    .iter()
+                    .map(|d| format!("{d:.3e}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                rep.time_orders
             ));
+            if let (Some([lo, hi]), Some(&o)) = (v.expected_time_order, rep.time_orders.last())
+                && !(lo..=hi).contains(&o)
+            {
+                rep.failures.push(format!(
+                    "observed time order {o:.3} on the smallest steps, outside [{lo}, {hi}]"
+                ));
+            }
+            let pts: Vec<(f64, f64)> = dts[1..]
+                .iter()
+                .copied()
+                .zip(diffs.iter().copied())
+                .collect();
+            let slope: Vec<(f64, f64)> = match (pts.first(), pts.last()) {
+                (Some(&a), Some(&b)) => vec![(a.0, b.1 * (a.0 / b.0).powi(2)), b],
+                _ => Vec::new(),
+            };
+            std::fs::write(
+                out.join("time_convergence.svg"),
+                plot::chart(
+                    &format!("{name}: change of the solution over the time step"),
+                    "Δt (s)",
+                    "‖u(Δt) − u(2Δt)‖ (m/s)",
+                    &[
+                        Series {
+                            label: "Foehncraft",
+                            points: &pts,
+                            markers: true,
+                        },
+                        Series {
+                            label: "slope 2",
+                            points: &slope,
+                            markers: false,
+                        },
+                    ],
+                    true,
+                    true,
+                ),
+            )?;
         }
-        let pts: Vec<(f64, f64)> = dts[1..]
-            .iter()
-            .copied()
-            .zip(diffs.iter().copied())
-            .collect();
-        let slope: Vec<(f64, f64)> = match (pts.first(), pts.last()) {
-            (Some(&a), Some(&b)) => vec![(a.0, b.1 * (a.0 / b.0).powi(2)), b],
-            _ => Vec::new(),
-        };
-        std::fs::write(
-            out.join("time_convergence.svg"),
-            plot::chart(
-                &format!("{name}: change of the solution over the time step"),
-                "Δt (s)",
-                "‖u(Δt) − u(2Δt)‖ (m/s)",
-                &[
-                    Series {
-                        label: "Foehncraft",
-                        points: &pts,
-                        markers: true,
-                    },
-                    Series {
-                        label: "slope 2",
-                        points: &slope,
-                        markers: false,
-                    },
-                ],
-                true,
-                true,
-            ),
-        )?;
     }
     if specs.len() >= 3 && outs.len() == specs.len() {
         let js: Vec<serde_json::Value> = outs
@@ -561,7 +588,12 @@ pub fn run(
         rep.uncertainty = crate::uncertainty::sweep(&js, &sizes);
         rep.uncertainty_of = of;
     }
-    if v.levels.len() >= 2 && v.time_steps.is_empty() && outs.len() == specs.len() {
+    // the velocity against [analytic] (the scalars are checked below)
+    if v.levels.len() >= 2
+        && v.time_steps.is_empty()
+        && outs.len() == specs.len()
+        && outs.iter().all(|o| o.solve.errors.is_some())
+    {
         let e: Vec<&ErrorNorms> = outs
             .iter()
             .filter_map(|s| s.solve.errors.as_ref())
@@ -650,6 +682,14 @@ pub fn run(
         }
     }
     rep.solves = outs.into_iter().map(|o| o.solve).collect();
+    // the scalars with an exact solution: the largest error, the orders
+    // of a sweep over levels (those of a time sweep are above)
+    let levels = if v.time_steps.is_empty() {
+        v.levels.len()
+    } else {
+        0
+    };
+    crate::scalar::check_sweep(&mut rep, v, levels, &mut |l| lg.line(l));
     rep.seconds = t0.elapsed().as_secs_f64();
     crate::case::end_frames(&mut lg, &rep);
     lg.sync(&mut steer.record);
@@ -1115,6 +1155,15 @@ fn run_one<F: FnMut(&str)>(
     let bench = case.verification.benchmark;
     let extra = benchmark_points(&case, mesh);
     let probes = Probes::new(&case, &extra, &loc, geo0);
+    // conjugate heat transfer (stage 7d6): the probes of the output on the
+    // full mesh, with the temperature in the solids (velocity and pressure
+    // zero there, as in the fields)
+    let full_probes = fl.cht.as_deref().map(|c| {
+        let v = c.view.clone();
+        let loc = Locator::new(&v.mesh, &v.geo);
+        (Probes::new(&case, &extra, &loc, &v.geo), v)
+    });
+    let probe_temperature = case.energy.is_some();
     let cont = restart_from.as_ref().map(|_| first_step);
     let hist_dir = out;
     let mut hunits = String::from(
@@ -1148,6 +1197,49 @@ fn run_one<F: FnMut(&str)>(
         &hhead,
         cont,
     )?;
+    // the heat balance of every step (stage 7d6): what the boundaries and
+    // the sources bring in, what each region stores, what goes through
+    // the interfaces of a conjugate case
+    let heat_regions: Vec<String> = match fl.cht.as_deref() {
+        Some(c) => c.fe.scalars.as_ref().map(|s| s.energy_regions()),
+        None => fl.scalars.as_ref().map(|s| s.energy_regions()),
+    }
+    .unwrap_or_default();
+    let heat_interfaces: Vec<String> = fl
+        .cht
+        .as_deref()
+        .map(|c| c.view.interfaces.clone())
+        .unwrap_or_default();
+    let mut heat_relative_max: Option<f64> = None;
+    let mut heat_csv = if last && !heat_regions.is_empty() {
+        let mut head = String::from("step,time,conduction,convection,source,storage");
+        for r in &heat_regions {
+            let _ = write!(head, ",{r}_storage");
+        }
+        for i in &heat_interfaces {
+            let _ = write!(head, ",{i}_heat");
+        }
+        head.push_str(",imbalance,relative");
+        Some(History::new(
+            out,
+            "heat.csv",
+            &crate::case::csv_preamble(
+                "heat",
+                name,
+                None,
+                "step -, time s, conduction W (into the domain through the boundaries), \
+                 convection W (sensible enthalpy carried in by the flow), source W (q''' and \
+                 viscous heating), storage W (stored in the step, all regions), \
+                 <region>_storage W, <interface>_heat W (into the fluid), imbalance W \
+                 (conduction + convection + source - storage), relative - (|imbalance| over \
+                 the largest heat flow)",
+            ),
+            &head,
+            cont,
+        )?)
+    } else {
+        None
+    };
     let walls: Vec<String> = mesh
         .boundaries
         .iter()
@@ -1214,18 +1306,25 @@ fn run_one<F: FnMut(&str)>(
         if frames.is_some() {
             let _ = write!(ph, ",{n}_u_rel,{n}_v_rel,{n}_w_rel");
         }
+        if probe_temperature {
+            let _ = write!(ph, ",{n}_T");
+        }
     }
-    let probe_units = if frames.is_some() {
-        "step -, time s, <probe>_u <probe>_v <probe>_w m/s, <probe>_p Pa, \
-         <probe>_u_rel <probe>_v_rel <probe>_w_rel m/s (relative to the turning zone)"
-    } else {
-        "step -, time s, <probe>_u <probe>_v <probe>_w m/s, <probe>_p Pa"
-    };
+    let mut probe_units =
+        String::from("step -, time s, <probe>_u <probe>_v <probe>_w m/s, <probe>_p Pa");
+    if frames.is_some() {
+        probe_units.push_str(
+            ", <probe>_u_rel <probe>_v_rel <probe>_w_rel m/s (relative to the turning zone)",
+        );
+    }
+    if probe_temperature {
+        probe_units.push_str(", <probe>_T K (the value of the cell)");
+    }
     let mut probe_csv = if monitors && !probes.names.is_empty() {
         Some(History::new(
             out,
             "probes.csv",
-            &crate::case::csv_preamble("probes", name, None, probe_units),
+            &crate::case::csv_preamble("probes", name, None, &probe_units),
             &ph,
             cont,
         )?)
@@ -1496,20 +1595,28 @@ fn run_one<F: FnMut(&str)>(
                     anyhow::ensure!(tr.rewind(&mut fl)?, "no valid state was kept");
                     let mut files = Vec::new();
                     if last && cfg!(feature = "hdf5") && case.output.vtkhdf {
-                        let sol = Solution {
-                            state: fl.state()?,
-                            disc: &fl.disc,
-                            phys: fl.physics(),
-                        };
-                        write_fields(
-                            &case,
-                            &out.join("fields_last_valid.vtkhdf"),
-                            mesh,
-                            geo,
-                            &sol,
-                            case.analytic_at(tr.clock.time).as_ref(),
-                            Some((tr.clock.step, Some(tr.clock.time))),
-                        )?;
+                        let path = out.join("fields_last_valid.vtkhdf");
+                        let at = Some((tr.clock.step, Some(tr.clock.time)));
+                        if case.fluid_view.is_some() {
+                            let st = fl.state()?;
+                            let full = crate::cht::full_state(&mut fl, &st)?;
+                            write_full_fields(&fl, &full, &path, at)?;
+                        } else {
+                            let sol = Solution {
+                                state: fl.state()?,
+                                disc: &fl.disc,
+                                phys: fl.physics(),
+                            };
+                            write_fields(
+                                &case,
+                                &path,
+                                mesh,
+                                geo,
+                                &sol,
+                                case.analytic_at(tr.clock.time).as_ref(),
+                                at,
+                            )?;
+                        }
                         files.push("fields_last_valid.vtkhdf");
                     }
                     if last && restart::AVAILABLE && imprint.is_none() {
@@ -1531,6 +1638,9 @@ fn run_one<F: FnMut(&str)>(
                 );
                 history.flush()?;
                 balance_csv.flush()?;
+                if let Some(f) = heat_csv.as_mut() {
+                    f.flush()?;
+                }
                 lg.sync(&mut steer.record);
                 steer.record.flush();
                 std::fs::write(out.join("flow.log"), &lg.text)?;
@@ -1550,6 +1660,60 @@ fn run_one<F: FnMut(&str)>(
         cfl_max = cfl_max.max(rp.cfl);
         let n = rp.step;
         let r = &rp.residuals;
+        // the heat balance of the step (stage 7d6)
+        let heat = match heat_csv.as_mut() {
+            Some(hc) if n.is_multiple_of(case.output.history_every) => {
+                let s = crate::scalar::summaries(
+                    &mut fl,
+                    &case,
+                    mesh,
+                    geo,
+                    crate::case::dimension(&case),
+                    rp.time,
+                )?;
+                let t = s.into_iter().find(|s| s.name == crate::energy::FIELD);
+                let hb = t.as_ref().and_then(|t| t.energy.clone()).map(|e| StepHeat {
+                    interfaces: heat_interfaces
+                        .iter()
+                        .map(|i| {
+                            t.iter()
+                                .flat_map(|t| &t.boundaries)
+                                .find(|b| &b.boundary == i)
+                                .and_then(|b| b.heat_flow)
+                                .unwrap_or(f64::NAN)
+                        })
+                        .collect(),
+                    balance: e,
+                });
+                if let Some(h) = &hb {
+                    let e = &h.balance;
+                    let mut row = format!(
+                        "{n},{:e},{:e},{:e},{:e},{:e}",
+                        rp.time,
+                        e.conduction,
+                        e.convection,
+                        e.source,
+                        e.storage.unwrap_or(0.0)
+                    );
+                    for r in &heat_regions {
+                        let v = e
+                            .storage_regions
+                            .iter()
+                            .find(|x| &x.region == r)
+                            .map_or(0.0, |x| x.storage);
+                        let _ = write!(row, ",{v:e}");
+                    }
+                    for q in &h.interfaces {
+                        let _ = write!(row, ",{q:e}");
+                    }
+                    let _ = write!(row, ",{:e},{:e}", e.imbalance, e.relative);
+                    hc.row(&row);
+                    heat_relative_max = Some(heat_relative_max.unwrap_or(0.0).max(e.relative));
+                }
+                hb
+            }
+            _ => None,
+        };
         if n.is_multiple_of(case.output.history_every) {
             let mut sc = String::new();
             for x in &r.turbulence.residual {
@@ -1587,6 +1751,9 @@ fn run_one<F: FnMut(&str)>(
                 });
                 if let Some(e) = rp.error {
                     row["error"] = e.into();
+                }
+                if let Some(hb) = &heat {
+                    row["heat"] = serde_json::to_value(hb)?;
                 }
                 steer.record.row(&row);
             }
@@ -1766,6 +1933,9 @@ fn run_one<F: FnMut(&str)>(
             // that is killed keeps them up to there
             history.flush()?;
             balance_csv.flush()?;
+            if let Some(f) = heat_csv.as_mut() {
+                f.flush()?;
+            }
             if let Some(f) = forces.as_mut() {
                 f.flush()?;
             }
@@ -1802,6 +1972,15 @@ fn run_one<F: FnMut(&str)>(
                 || restart_numbered
                 || sr.fired(t0, rp.time, tol)
                 || asked);
+        // the fields of a conjugate case are written on the whole mesh, the
+        // probes are found there
+        let full_fields = match (fields_now || at_monitor, &case.fluid_view) {
+            (true, Some(_)) => {
+                let st = fl.state()?;
+                Some(crate::cht::full_state(&mut fl, &st)?)
+            }
+            _ => None,
+        };
         if at_monitor || fields_now {
             let sol = Solution {
                 state: fl.state()?,
@@ -1867,7 +2046,10 @@ fn run_one<F: FnMut(&str)>(
                 }
                 let here = imprint.is_some().then(|| probes.relocated(mesh, geo));
                 let pr = here.as_ref().unwrap_or(&probes);
-                let vals = pr.values(&sol, geo);
+                let (vals, temps) = match (&full_probes, &full_fields) {
+                    (Some((fp, v)), Some(st)) => (fp.values(st, &v.geo), fp.temperatures(st)),
+                    _ => (pr.values(&sol, geo), pr.temperatures(&sol)),
+                };
                 if let Some(pc) = probe_csv.as_mut() {
                     let rel = frames.as_ref().map(|f| pr.relative(f, mesh, &vals));
                     let mut row = format!("{n},{:e}", rp.time);
@@ -1875,6 +2057,9 @@ fn run_one<F: FnMut(&str)>(
                         let _ = write!(row, ",{:e},{:e},{:e},{p:e}", u[0], u[1], u[2]);
                         if let Some(r) = &rel {
                             let _ = write!(row, ",{:e},{:e},{:e}", r[k][0], r[k][1], r[k][2]);
+                        }
+                        if probe_temperature {
+                            let _ = write!(row, ",{:e}", temps[k]);
                         }
                     }
                     pc.row(&row);
@@ -1893,15 +2078,19 @@ fn run_one<F: FnMut(&str)>(
                 }
             }
             if fields_now {
-                write_fields(
-                    &case,
-                    &out.join(format!("fields_{n:06}.vtkhdf")),
-                    mesh,
-                    geo,
-                    &sol,
-                    case.analytic_at(rp.time).as_ref(),
-                    Some((n, Some(rp.time))),
-                )?;
+                let path = out.join(format!("fields_{n:06}.vtkhdf"));
+                match &full_fields {
+                    Some(st) => write_full_fields(&fl, st, &path, Some((n, Some(rp.time))))?,
+                    None => write_fields(
+                        &case,
+                        &path,
+                        mesh,
+                        geo,
+                        &sol,
+                        case.analytic_at(rp.time).as_ref(),
+                        Some((n, Some(rp.time))),
+                    )?,
+                }
                 lg.note(&format!(
                     "fields of step {n} written (fields_{n:06}.vtkhdf)"
                 ));
@@ -1972,6 +2161,9 @@ fn run_one<F: FnMut(&str)>(
     let (mesh, geo) = current(&work, mesh0, geo0);
     history.flush()?;
     balance_csv.flush()?;
+    if let Some(f) = heat_csv.as_mut() {
+        f.flush()?;
+    }
     if let Some(f) = forces.as_mut() {
         f.flush()?;
     }
@@ -2027,6 +2219,13 @@ fn run_one<F: FnMut(&str)>(
     )?;
     let periodic = crate::case::periodic_summaries(&mut fl, mesh, lg)?;
     let turbulence = crate::case::turbulence_summary(&mut fl, mesh, lg, warnings)?;
+    // conjugate heat transfer: the fields of the output on the full mesh
+    let full_out = if case.fluid_view.is_some() {
+        let st = fl.state()?;
+        Some(crate::cht::full_state(&mut fl, &st)?)
+    } else {
+        None
+    };
     let sol = Solution {
         state: fl.state()?,
         disc: &fl.disc,
@@ -2163,17 +2362,38 @@ fn run_one<F: FnMut(&str)>(
         if let Some(rb) = &balance_summary.run {
             std::fs::write(out.join("balance.svg"), balance::chart(name, rb, true))?;
         }
-        write_outputs(
-            &case,
-            out,
-            mesh,
-            geo,
-            &sol,
-            analytic_end.as_ref(),
-            &boundaries,
-            loc_end,
-            Some((tr.clock.step, Some(tr.clock.time))),
-        )?;
+        match (&full_out, fl.cht.as_deref()) {
+            (Some(st), Some(c)) => {
+                let v = &c.view;
+                let full = Solution {
+                    state: st.clone(),
+                    disc: &c.fe.disc,
+                    phys: c.fe.physics(),
+                };
+                write_outputs(
+                    &v.full_case,
+                    out,
+                    &v.mesh,
+                    &v.geo,
+                    &full,
+                    None,
+                    &boundaries,
+                    &Locator::new(&v.mesh, &v.geo),
+                    Some((tr.clock.step, Some(tr.clock.time))),
+                )?;
+            }
+            _ => write_outputs(
+                &case,
+                out,
+                mesh,
+                geo,
+                &sol,
+                analytic_end.as_ref(),
+                &boundaries,
+                loc_end,
+                Some((tr.clock.step, Some(tr.clock.time))),
+            )?,
+        }
         if !bt.is_empty() {
             let window = |c: &[f64]| -> Vec<(f64, f64)> {
                 bt.iter()
@@ -2234,7 +2454,18 @@ fn run_one<F: FnMut(&str)>(
         )?),
         _ => None,
     };
-    let scalar_fields: Vec<Vec<f64>> = sol.state.scalars.iter().map(|x| x.phi.clone()).collect();
+    // the scalars of the sweeps: those of the full mesh in a conjugate case
+    let (scalar_fields, scalar_volume): (Vec<Vec<f64>>, Vec<f64>) =
+        match (&full_out, fl.cht.as_deref()) {
+            (Some(st), Some(c)) => (
+                st.scalars.iter().map(|x| x.phi.clone()).collect(),
+                c.view.geo.cell_volume[..c.view.mesh.n_cells].to_vec(),
+            ),
+            _ => (
+                sol.state.scalars.iter().map(|x| x.phi.clone()).collect(),
+                geo.cell_volume.clone(),
+            ),
+        };
     let solve = Solve {
         scalars,
         periodic,
@@ -2276,6 +2507,7 @@ fn run_one<F: FnMut(&str)>(
             restart_from,
             stopped,
             ns_per_cell_step: 1e9 * secs / (nc as f64 * nsteps.max(1) as f64),
+            heat_relative_max,
         }),
         benchmark,
     };
@@ -2283,6 +2515,7 @@ fn run_one<F: FnMut(&str)>(
     Ok(RunOut {
         u: sol.state.u.clone(),
         scalars: scalar_fields,
+        scalar_volume,
         solve,
         volume,
         stopped,
@@ -2291,6 +2524,28 @@ fn run_one<F: FnMut(&str)>(
 
 /// C_D and C_L of the benchmark cylinder: 2 F / (ρ Ū² D H) with H the depth
 /// of the slab.
+/// The fields of a conjugate case on the whole mesh (stage 7d6): the state
+/// `st` of [`crate::cht::full_state`] with the full case, mesh and the
+/// energy view's discretisation.
+fn write_full_fields(
+    fl: &Flow,
+    st: &crate::simplec::State,
+    path: &Path,
+    at: Option<(usize, Option<f64>)>,
+) -> Result<()> {
+    let c = fl
+        .cht
+        .as_deref()
+        .context("the fields of a conjugate case without its energy view")?;
+    let v = &c.view;
+    let sol = Solution {
+        state: st.clone(),
+        disc: &c.fe.disc,
+        phys: c.fe.physics(),
+    };
+    write_fields(&v.full_case, path, &v.mesh, &v.geo, &sol, None, at)
+}
+
 /// The front and back points of the benchmark (Δp), as extra probes.
 pub(crate) fn benchmark_points(
     case: &FlowCase,

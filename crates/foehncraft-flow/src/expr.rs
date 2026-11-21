@@ -298,6 +298,8 @@ const FUNCTIONS1: &[(&str, u32)] = &[
     ("ceil", fn1::CEIL),
     ("round", fn1::ROUND),
     ("sign", fn1::SIGN),
+    ("erf", fn1::ERF),
+    ("erfc", fn1::ERFC),
 ];
 const FUNCTIONS2: &[(&str, u32)] = &[
     ("atan2", fn2::ATAN2),

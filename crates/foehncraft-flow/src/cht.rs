@@ -403,6 +403,20 @@ impl ChtTurb {
     }
 }
 
+/// The temperature fields of the energy view of a conjugate case with the
+/// device they live on (their time levels, kept and rewound states follow
+/// those of the flow, stage 7d6).
+pub(crate) fn energy_fields(
+    fl: &mut crate::simplec::Flow,
+) -> Option<(
+    &mut crate::scalar::Scalars,
+    &mut dyn crate::device::FlowDevice,
+)> {
+    let c = fl.cht.as_deref_mut()?;
+    let fe = &mut c.fe;
+    Some((fe.scalars.as_mut()?, fe.dev.as_mut()))
+}
+
 /// Attaches the energy equation on the full mesh to the flow of the fluid
 /// view.
 pub fn attach(fl: &mut crate::simplec::Flow, view: Arc<FluidView>) -> Result<()> {
@@ -419,13 +433,14 @@ pub fn attach(fl: &mut crate::simplec::Flow, view: Arc<FluidView>) -> Result<()>
     let arrays = crate::bc::arrays(mesh, geo, &full.boundary, phys.rho, at)?;
     let disc = crate::simplec::discretisation(mesh, geo, &arrays)?;
     let phys = crate::case::physics_on(full, &phys, mesh, geo)?;
-    let mut fe = crate::simplec::Flow::new(
+    // (the settings are those of the case, checked as transient or steady
+    // with it; the energy view takes only its energy and scalar parts)
+    let mut fe = crate::simplec::Flow::on(
         disc,
         arrays,
         phys,
         full.solver.clone(),
-        [0.0; 3],
-        0.0,
+        full.time.is_some(),
         None,
         &crate::simplec::Target {
             device: full.run.backend.clone(),
@@ -433,6 +448,8 @@ pub fn attach(fl: &mut crate::simplec::Flow, view: Arc<FluidView>) -> Result<()>
             ptx: full.run.ptx.clone(),
         },
     )?;
+    let nc = fe.disc.n_cells;
+    fe.initialise(&foehncraft_fv::disc::Soa3::zeros(nc), &vec![0.0; nc])?;
     crate::scalar::attach(&mut fe, full, mesh, geo)?;
     fl.cht = Some(Box::new(Cht {
         fe,
